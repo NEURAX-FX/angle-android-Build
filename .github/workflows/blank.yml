@@ -1,17 +1,11 @@
-name: Build ANGLE for Android
+name: Build ANGLE for Android (Standalone)
 
 on:
-  workflow_dispatch: # 手动触发
-  schedule:
-    - cron: "0 2 * * 0" # 每周日自动构建
+  workflow_dispatch:
 
 jobs:
   build-android:
     runs-on: ubuntu-latest
-    # 增加存储空间，因为编译 Chromium/ANGLE 需要巨大的磁盘空间
-    env:
-      DEPOT_TOOLS_UPDATE: 0
-
     steps:
       - name: Maximize Build Space
         uses: easimon/maximize-build-space@master
@@ -21,56 +15,62 @@ jobs:
           remove-dotnet: 'true'
           remove-android: 'true'
           remove-haskell: 'true'
-          remove-codeql: 'true'
-
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git python3 curl
 
       - name: Setup Depot Tools
         run: |
-          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          git clone --depth 1 https://chromium.googlesource.com/chromium/tools/depot_tools.git
           echo "$PWD/depot_tools" >> $GITHUB_PATH
 
-      - name: Fetch ANGLE Source
+      - name: Sync ANGLE Standalone (The "Lightweight" Way)
         run: |
-          mkdir angle
-          cd angle
-          # 初始化 gclient 配置，指定目标为 Android
-          fetch --nohooks android
+          mkdir angle-standalone && cd angle-standalone
+          # 关键点：配置 .gclient 只关注 ANGLE 及其 Android 依赖
+          gclient config --spec 'solutions = [
+            {
+              "name": "src",
+              "url": "https://chromium.googlesource.com/angle/angle.git",
+              "deps_file": "DEPS",
+              "managed": False,
+              "custom_deps": {},
+              "custom_vars": {"checkout_android": True},
+            },
+          ]
+          target_os = ["android"]'
           
-          # 修改 .gclient 配置文件以减少下载量 (只拉取必要部分)
-          cat <<EOF >> .gclient
-          target_os = ['android']
-          EOF
-          
-          # 同步代码 (这一步最耗时)
-          gclient sync --no-history --shallow
+          # 使用 --no-history 和 --shallow 极致瘦身
+          # 这步只会拉取 ANGLE 必需的 2GB 左右的依赖，而不是 60GB 的 Chromium
+          gclient sync --no-history --shallow --nohooks -j$(nproc)
 
-      - name: Install Android Build Deps
+      - name: Run Hooks (Download Toolchains)
         run: |
-          cd angle/src
-          # 安装编译所需的系统库
-          ./build/install-build-deps.sh --android
+          cd angle-standalone/src
+          # 这一步会下载 Clang 和 Android NDK，大概几百 MB
+          gclient runhooks
 
       - name: Configure Build (GN Args)
         run: |
-          cd angle/src
-          # 生成构建配置
-          # target_cpu="arm64" 对应你的天玑 9300
-          # angle_enable_vulkan=true 开启 Vulkan 后端 (核心)
-          # android64_ndk_api_level=34 适配 Android 14/15
-          gn gen out/Release --args='target_os="android" target_cpu="arm64" is_debug=false is_component_build=false angle_enable_vulkan=true angle_enable_gl=false angle_enable_wgpu=false dcheck_always_on=false symbol_level=0 android64_ndk_api_level=34'
+          cd angle-standalone/src
+          # 为天玑 9300 (arm64) 定制，开启 Vulkan，关闭不必要的后端
+          gn gen out/Release --args='
+            target_os="android"
+            target_cpu="arm64"
+            is_debug=false
+            is_component_build=false
+            angle_enable_vulkan=true
+            angle_enable_gl=true
+            angle_enable_wgpu=false
+            symbol_level=0
+            android64_ndk_api_level=34
+            angle_standalone=true'
 
-      - name: Build APK
+      - name: Build System ANGLE APK
         run: |
-          cd angle/src
-          # 直接编译 angle_apks 目标，这会生成一个安装包
+          cd angle-standalone/src
+          # 编译特定的 APK 目标
           autoninja -C out/Release angle_apks
 
-      - name: Upload APK Artifact
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Angle-Android-arm64
-          path: angle/src/out/Release/apks/*.apk
+          name: System-ANGLE-arm64
+          path: angle-standalone/src/out/Release/apks/*.apk
