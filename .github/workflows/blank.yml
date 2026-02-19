@@ -1,0 +1,76 @@
+name: Build ANGLE for Android
+
+on:
+  workflow_dispatch: # 手动触发
+  schedule:
+    - cron: "0 2 * * 0" # 每周日自动构建
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+    # 增加存储空间，因为编译 Chromium/ANGLE 需要巨大的磁盘空间
+    env:
+      DEPOT_TOOLS_UPDATE: 0
+
+    steps:
+      - name: Maximize Build Space
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 2048
+          swap-size-mb: 1024
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git python3 curl
+
+      - name: Setup Depot Tools
+        run: |
+          git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git
+          echo "$PWD/depot_tools" >> $GITHUB_PATH
+
+      - name: Fetch ANGLE Source
+        run: |
+          mkdir angle
+          cd angle
+          # 初始化 gclient 配置，指定目标为 Android
+          fetch --nohooks android
+          
+          # 修改 .gclient 配置文件以减少下载量 (只拉取必要部分)
+          cat <<EOF >> .gclient
+          target_os = ['android']
+          EOF
+          
+          # 同步代码 (这一步最耗时)
+          gclient sync --no-history --shallow
+
+      - name: Install Android Build Deps
+        run: |
+          cd angle/src
+          # 安装编译所需的系统库
+          ./build/install-build-deps.sh --android
+
+      - name: Configure Build (GN Args)
+        run: |
+          cd angle/src
+          # 生成构建配置
+          # target_cpu="arm64" 对应你的天玑 9300
+          # angle_enable_vulkan=true 开启 Vulkan 后端 (核心)
+          # android64_ndk_api_level=34 适配 Android 14/15
+          gn gen out/Release --args='target_os="android" target_cpu="arm64" is_debug=false is_component_build=false angle_enable_vulkan=true angle_enable_gl=false angle_enable_wgpu=false dcheck_always_on=false symbol_level=0 android64_ndk_api_level=34'
+
+      - name: Build APK
+        run: |
+          cd angle/src
+          # 直接编译 angle_apks 目标，这会生成一个安装包
+          autoninja -C out/Release angle_apks
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Angle-Android-arm64
+          path: angle/src/out/Release/apks/*.apk
